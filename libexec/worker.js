@@ -20,6 +20,11 @@ var sys = require('sys');
 var wwutil = require('webworker-utils');
 
 var writeError = process.binding('stdio').writeError;
+var debugLevel = ('NODE_DEBUG' in process.env) ?
+    parseInt(process.env.NODE_DEBUG) : -1;
+var debug = ('NODE_DEBUG' in process.env) ?
+    function (l, x) { if (l >= debugLevel) { writeError(x); } } :
+    function (l, x) {}
 
 if (process.argv.length < 4) {
     throw new Error('usage: node worker.js <sock> <script>');
@@ -95,6 +100,63 @@ workerCtx.self = workerCtx;
 workerCtx.location = scriptLoc;
 workerCtx.close = function() {
     process.exit(0);
+};
+workerCtx.importScripts = function() {
+    var importSingleScript = function(l, i) {
+        scriptData[i] = undefined;
+        scriptFilenames[i] = l.href;
+        
+        debug(1, 'importScript(' + l.href + ', ' + i + ')');
+
+        switch (l.protocol) {
+        case 'http':
+            var hc = http.createClient(l.port, l.hostname);
+            var hr = hc.request(l.pathname + l.search + l.hash);
+
+            hr.addListener('response', function(resp) {
+                resp.data = '';
+
+                resp.addListener('data', function(d) {
+                    resp.data += d.toString('utf8');
+                });
+
+                resp.addListener('end', function() {
+                    scriptData[i] = resp.data;
+
+                    debug(2, 'Finished importing ' + i);
+
+                    while (lastScriptLoaded < (scriptData.length - 1) &&
+                           scriptData[lastScriptLoaded + 1]) {
+                        debug(2, 'Executing ' + lastScriptLoaded);
+
+                        script.Script.runInThisContext(
+                            scriptData[lastScriptLoaded + 1],
+                            scriptFilenames[lastScriptLoaded + 1]
+                        );
+
+                        lastScriptLoaded++;
+                    }
+                });
+            });
+
+            hr.end();
+
+        default:
+            writeError('Unable to load script from ' + l.href);
+            process.exit(1);
+        }
+    };
+
+    var scriptData = [];
+    var scriptFilenames = [];
+    var lastScriptLoaded = -1;
+
+    for (var i = 0; i < arguments.length; i++) {
+        importSingleScript(
+            new wwutil.WorkerLocation(arguments[i]),
+            i
+        );
+    }
 };
 
 scriptObj.runInNewContext(workerCtx);
